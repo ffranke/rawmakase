@@ -908,6 +908,164 @@ fn adjust(lab_in: vec3<f32>) -> vec3<f32> {
     }
     return lab;
 }
+// Fork: the path without reference curves (`pipeline/pixel.rs` with
+// `reference_curves == false`, engine 4, reference colour, a profile tone curve).
+fn legacy() -> bool {
+    return p(P_LEGACY) != 0.0;
+}
+// `tone_stage`: the original Dehaze, then Whites, Blacks, Shadows and Highlights as
+// exposure weighted by the pixel's luminance; the profile's tone curve maps the result.
+fn legacy_tone(wide_in: vec3<f32>) -> vec3<f32> {
+    var wide = wide_in;
+    let a = p(P_LEGACY_TONE + 4u);
+    if a > 0.0 {
+        wide = (wide - a * 0.02) / (1.0 - a * 0.6);
+    } else if a < 0.0 {
+        wide = wide * (1.0 + a * 0.3) - a * 0.03;
+    }
+    let y = max(luma2020(wide), 1e-8);
+    let shadow = exp(-y * 6.0);
+    let high = y / (y + 0.5);
+    let ev = p(P_LEGACY_TONE + 2u) * shadow * 2.0
+        + p(P_LEGACY_TONE + 3u) * high * 2.0
+        + p(P_LEGACY_TONE) * high * high * high
+        + p(P_LEGACY_TONE + 1u) * shadow * shadow * shadow;
+    let shaped = y * exp2(ev);
+    return wide * shaped / y;
+}
+// `apply_curve`: Levels, Contrast, the original parametric curve and the point curves
+// of encoded channel `c`.
+fn apply_curve(encoded: f32, c: u32) -> f32 {
+    let bp = p(P_LEVELS);
+    let wp = p(P_LEVELS + 1u);
+    let level = powf(clamp((encoded - bp) / (wp - bp), 0.0, 1.0), 1.0 / p(P_LEVELS + 2u));
+    let contrast = p(P_LEGACY_CURVE);
+    var x: f32;
+    if p(P_LEGACY_CURVE + 1u) != 0.0 && contrast != 0.0 {
+        let power = exp2(contrast);
+        let low = powf(level, power);
+        x = low / max(low + powf(1.0 - level, power), 1e-8);
+    } else {
+        x = clamp((level - 0.5) * (1.0 + contrast) + 0.5, 0.0, 1.0);
+    }
+    let master = lut(offset(P_MASTER), 4096u, parametric(x));
+    if p(P_CHANNEL_IDENTITY + c) != 0.0 {
+        return master;
+    }
+    return lut(offset(P_CHANNELS + c), 4096u, master);
+}
+// `mixer_stage`: the wide-gamut curves in gamma-2.2 ProPhoto.
+fn legacy_curves(rgb: vec3<f32>) -> vec3<f32> {
+    if p(P_LEGACY_CURVE + 1u) == 0.0 {
+        return rgb;
+    }
+    let pro = RGB_TO_PRO * rgb;
+    var q: vec3<f32>;
+    for (var k = 0u; k < 3u; k++) {
+        let v = powf(clamp(pro[k], 0.0, 1.0), 1.0 / 2.2);
+        q[k] = powf(apply_curve(v, k), 2.2);
+    }
+    return PRO_TO_RGB * q;
+}
+// `legacy_rgb_table`: a look's RGB table after the colour controls.
+fn legacy_rgb_table(lab: vec3<f32>) -> vec3<f32> {
+    if offset(P_RGB) >= 0 && p(P_RGB + 5u) != 0.0 {
+        return srgb_to_lab(rgb_table(lab_to_srgb(lab)));
+    }
+    return lab;
+}
+// `color::vibrance_gain`.
+fn vibrance_gain(hue: f32, chroma: f32, amount: f32) -> f32 {
+    let distance = rem_euclid(hue - 0.16 + 0.5, 1.0) - 0.5;
+    let d = distance / 0.09;
+    let warm = exp(-(d * d));
+    return 1.0 + amount * 0.8 * (1.0 - clamp(chroma / 0.3, 0.0, 1.0)) * (1.0 - 0.5 * warm);
+}
+// `color_stage`'s Oklab colour controls with the sliders of this path.
+fn legacy_adjust(lab_in: vec3<f32>) -> vec3<f32> {
+    var lab = lab_in;
+    let chroma = length(lab.yz);
+    let hue = rem_euclid(atan2(lab.z, lab.y), TAU) / TAU;
+    let weights = hue_weights(hue);
+    var delta = vec3(0.0);
+    for (var i = 0u; i < 8u; i++) {
+        delta += vec3(p(P_HSL + i * 3u), p(P_HSL + i * 3u + 1u), p(P_HSL + i * 3u + 2u)) * weights[i];
+    }
+    delta.z *= clamp(chroma / 0.04, 0.0, 1.0);
+    let angle = (hue + delta.x / 8.0) * TAU;
+    let vibrance = vibrance_gain(hue, chroma, p(P_LEGACY_COLOR + 1u));
+    let sat = (1.0 + p(P_LEGACY_COLOR)) * vibrance * (1.0 + delta.y);
+    let l = clamp(lab.x, 0.0, 1.0);
+    let response = 0.5 * l * (1.0 - l);
+    lab.x = clamp(lab.x + delta.z * response, 0.0, 1.0);
+    lab.y = cos(angle) * chroma * sat;
+    lab.z = sin(angle) * chroma * sat;
+    lab = defringe(lab, hue);
+    lab = legacy_rgb_table(lab);
+    if p(P_MONO) != 0.0 {
+        var shift = 0.0;
+        for (var i = 0u; i < 8u; i++) {
+            shift += p(P_GRAY_MIX + i) * weights[i];
+        }
+        if offset(P_GRAY_GRID) >= 0 {
+            let scaled = mixer(max(lab_to_srgb(lab), vec3(0.0)), offset(P_GRAY_GRID));
+            let y = max(dot(scaled, vec3(0.2126, 0.7152, 0.0722)), 0.0);
+            lab.x = clamp(pow(y, 1.0 / 3.0), 0.0, 1.0);
+        } else {
+            lab.x = clamp(lab.x + shift * chroma * select(4.37, 1.78, shift > 0.0), 0.0, 1.0);
+        }
+        lab.y = 0.0;
+        lab.z = 0.0;
+    }
+    return lab;
+}
+// `color::hue_rgb`.
+fn hue_rgb(hue: f32) -> vec3<f32> {
+    let h = rem_euclid(hue, 1.0) * 6.0;
+    let x = 1.0 - abs(rem_euclid(h, 2.0) - 1.0);
+    switch u32(h) {
+        case 0u: { return vec3(1.0, x, 0.0); }
+        case 1u: { return vec3(x, 1.0, 0.0); }
+        case 2u: { return vec3(0.0, 1.0, x); }
+        case 3u: { return vec3(0.0, x, 1.0); }
+        case 4u: { return vec3(x, 0.0, 1.0); }
+        default: { return vec3(1.0, 0.0, x); }
+    }
+}
+fn grade_tint(value: f32, tint: f32) -> f32 {
+    return value + (2.0 * tint - 1.0) * value * (1.0 - value);
+}
+fn grade_lift(value: f32, amount: f32) -> f32 {
+    return clamp(value + amount * (0.01 + 0.4 * value * (1.0 - value)), 0.0, 1.0);
+}
+// `color::grade`: the original colour grading, in gamma-2.2 ProPhoto.
+fn legacy_grade(rgb: vec3<f32>) -> vec3<f32> {
+    let pro = RGB_TO_PRO * rgb;
+    var q = vec3(
+        powf(clamp(pro.x, 0.0, 1.0), 1.0 / 2.2),
+        powf(clamp(pro.y, 0.0, 1.0), 1.0 / 2.2),
+        powf(clamp(pro.z, 0.0, 1.0), 1.0 / 2.2),
+    );
+    let l = clamp((q.x + q.y + q.z) / 3.0 + p(P_GRADE_BALANCE) * 0.3, 0.0, 1.0);
+    let power = exp2(1.5 - p(P_GRADE_BALANCE + 1u));
+    let w = vec3(powf(1.0 - l, power), 0.5 * powf(4.0 * l * (1.0 - l), power), powf(l, power));
+    var tint = vec3(0.0);
+    var luminance = 0.0;
+    for (var i = 0u; i < 3u; i++) {
+        let g = vec3(p(P_GRADING + i * 3u), p(P_GRADING + i * 3u + 1u), p(P_GRADING + i * 3u + 2u));
+        tint += (hue_rgb(g.x) - 0.5) * g.y * w[i] * 0.7;
+        luminance += g.z * w[i];
+    }
+    for (var k = 0u; k < 3u; k++) {
+        q[k] = grade_tint(grade_lift(q[k], luminance), clamp(0.5 + tint[k], 0.0, 1.0));
+    }
+    let g = vec3(p(P_GLOBAL_GRADE), p(P_GLOBAL_GRADE + 1u), p(P_GLOBAL_GRADE + 2u));
+    let color = hue_rgb(g.x);
+    for (var k = 0u; k < 3u; k++) {
+        q[k] = grade_tint(grade_lift(q[k], g.z), 0.5 + (color[k] - 0.5) * g.y * 0.4);
+    }
+    return PRO_TO_RGB * vec3(powf(q.x, 2.2), powf(q.y, 2.2), powf(q.z, 2.2));
+}
 fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
     point_selection = -1.0;
     // tone_stage
@@ -932,14 +1090,19 @@ fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
     } else {
         wide = wide * p(P_EXPOSURE);
     }
-    if masked && delta[L_EXPOSURE] != 0.0 {
-        let black = 0.0015 * exp2(p(P_EXPOSURE_EV) + delta[L_EXPOSURE]);
-        wide = vec3(ramp_with(wide.x, black), ramp_with(wide.y, black), ramp_with(wide.z, black));
+    if legacy() {
+        // No exposure ramp on this path.
+        wide = legacy_tone(wide);
     } else {
-        wide = vec3(ramp(wide.x), ramp(wide.y), ramp(wide.z));
+        if masked && delta[L_EXPOSURE] != 0.0 {
+            let black = 0.0015 * exp2(p(P_EXPOSURE_EV) + delta[L_EXPOSURE]);
+            wide = vec3(ramp_with(wide.x, black), ramp_with(wide.y, black), ramp_with(wide.z, black));
+        } else {
+            wide = vec3(ramp(wide.x), ramp(wide.y), ramp(wide.z));
+        }
+        let y = max(luma2020(wide), 1e-8);
+        wide = wide * y / y;
     }
-    let y = max(luma2020(wide), 1e-8);
-    wide = wide * y / y;
     var rgb = profile_finish(FROM_2020 * wide);
     // Toning the reduced photo for the Shadows/Highlights map (`tone_params`).
     if p(P_TONE_ONLY) != 0.0 {
@@ -949,7 +1112,12 @@ fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
         rgb *= local_gain(pos, rgb);
     }
     // color_stage
-    rgb = reference_curves(rgb);
+    let old = legacy();
+    if old {
+        rgb = legacy_curves(rgb);
+    } else {
+        rgb = reference_curves(rgb);
+    }
     if offset(P_MIXER) >= 0 {
         // SaturationModel::Gray: below −50, a fade to the luminance the color has
         // through the other sliders.
@@ -964,7 +1132,7 @@ fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
     if offset(P_POINT) >= 0 {
         rgb = point_colors(rgb);
     }
-    if offset(P_RGB) >= 0 && p(P_RGB + 5u) != 0.0 {
+    if !old && offset(P_RGB) >= 0 && p(P_RGB + 5u) != 0.0 {
         rgb = rgb_table(rgb);
     }
     if offset(P_GRADE) >= 0 {
@@ -979,12 +1147,20 @@ fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
         lab.y = (a * cos(angle) - b * sin(angle)) * k;
         lab.z = (a * sin(angle) + b * cos(angle)) * k;
     }
-    if p(P_ADJUST) != 0.0 {
+    if old && p(P_ADJUST) != 0.0 {
+        lab = legacy_adjust(lab);
+    } else if old {
+        lab = legacy_rgb_table(lab);
+        lab.x = clamp(lab.x, 0.0, 1.0);
+    } else if p(P_ADJUST) != 0.0 {
         lab = adjust(lab);
     } else {
         lab.x = clamp(lab.x, 0.0, 1.0);
     }
     rgb = lab_to_srgb(lab);
+    if old && p(P_GRADE_ON) != 0.0 {
+        rgb = legacy_grade(rgb);
+    }
     lab = srgb_to_lab(rgb);
     let l = clamp(lab.x, 0.0, 1.0);
     let gray = l * l * l;
@@ -1005,7 +1181,12 @@ fn process_pixel(sample: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
     }
     var out: vec3<f32>;
     for (var k = 0; k < 3; k++) {
-        out[k] = clamp(srgb_encode(select(gray + (rgb[k] - gray) * gamut, clamp(rgb[k], 0.0, 1.0), clip)), 0.0, 1.0);
+        let encoded = srgb_encode(select(gray + (rgb[k] - gray) * gamut, clamp(rgb[k], 0.0, 1.0), clip));
+        if old && p(P_LEGACY_CURVE + 1u) == 0.0 {
+            out[k] = apply_curve(encoded, u32(k));
+        } else {
+            out[k] = clamp(encoded, 0.0, 1.0);
+        }
     }
     if point_selection >= 0.0 {
         out = visualize(out);

@@ -76,6 +76,22 @@ const FIELDS: &[(&str, usize)] = &[
     ("LOCAL_FAMILIES", 1),
     ("LOCAL_KEYS", 2),
     ("GLOBAL_SH", 2),
+    // Fork: the path without reference curves (`reference_curves == false`): 1 when on.
+    ("LEGACY", 1),
+    // Whites, Blacks, Shadows, Highlights and Dehaze as `tone_stage` applies them.
+    ("LEGACY_TONE", 5),
+    // Contrast, and 1 for `wide_gamut_curves` (`apply_curve`).
+    ("LEGACY_CURVE", 2),
+    // 1 for each channel curve that is the identity.
+    ("CHANNEL_IDENTITY", 3),
+    // Saturation and Vibrance (Oklab, `color_stage`).
+    ("LEGACY_COLOR", 2),
+    ("HSL", 24),
+    // `color::grade`: on, the three wheels, Global, Balance and Blending.
+    ("GRADE_ON", 1),
+    ("GRADING", 9),
+    ("GLOBAL_GRADE", 3),
+    ("GRADE_BALANCE", 2),
 ];
 pub(crate) fn wgsl_prelude() -> String {
     use crate::develop::point_color::{CONSTANT_PARAMS, SWATCH_PARAMS};
@@ -145,6 +161,9 @@ impl PixelParams {
 }
 /// Whether the GPU port renders this (resolved) recipe.
 pub(crate) fn supported(r: &Recipe) -> bool {
+    if legacy(r) {
+        return true;
+    }
     let grading = r.grading.iter().any(|g| g[1] != 0. || g[2] != 0.)
         || r.effects.global_grade[1] != 0.
         || r.effects.global_grade[2] != 0.;
@@ -157,6 +176,17 @@ pub(crate) fn supported(r: &Recipe) -> bool {
         // The original operator's Blending and Balance outside its tables use the
         // older operator.
         && (!grading || crate::develop::color_grade::ColorGrade::new(r).is_some())
+}
+/// Fork: the path without reference curves the port also renders: engine 4 with
+/// reference colour and calibration and a profile tone curve, as a film scan
+/// presented as a neutral camera renders.
+pub(crate) fn legacy(r: &Recipe) -> bool {
+    r.engine >= 4
+        && !r.reference_curves
+        && r.reference_color
+        && r.reference_calibration
+        && r.profile_tone
+        && r.profile.is_some()
 }
 /// Parameters for `im`'s per-pixel stage with the resolved recipe `r`, or `None` when
 /// the GPU port does not cover it.
@@ -286,8 +316,12 @@ fn fill(r: &Recipe, lut: CurveSet, matrix: [[f32; 3]; 3]) -> Option<PixelParams>
     p.set("CALIBRATION", lut.calibration.matrix.as_flattened());
     p.set("SHADOW_TINT", &[lut.calibration.shadow]);
     p.set("EXPOSURE", &[lut.exposure_gain]);
-    let ramp = lut.black_ramp.as_ref()?;
-    p.set("RAMP", &[ramp.black, ramp.slope, ramp.radius, ramp.q]);
+    if legacy(r) {
+        set_legacy(&mut p, r);
+    } else {
+        let ramp = lut.black_ramp.as_ref()?;
+        p.set("RAMP", &[ramp.black, ramp.slope, ramp.radius, ramp.q]);
+    }
     p.table("LOOK", t.look);
     p.table("ENH", t.enhanced);
     let curve = match t.enhanced_curve {
@@ -391,6 +425,27 @@ fn fill(r: &Recipe, lut: CurveSet, matrix: [[f32; 3]; 3]) -> Option<PixelParams>
     p.set("MONO", &[e.monochrome as u8 as f32]);
     p.set("GRAY_MIX", &e.gray_mix);
     Some(p)
+}
+/// Fork: the sliders the path without reference curves applies per pixel.
+fn set_legacy(p: &mut PixelParams, r: &Recipe) {
+    let e = &r.effects;
+    p.set("LEGACY", &[1.]);
+    p.set("LEGACY_TONE", &[r.whites, r.blacks, r.shadows, r.highlights, e.dehaze]);
+    p.set("LEGACY_CURVE", &[r.contrast, r.wide_gamut_curves as u8 as f32]);
+    let identity = e
+        .channels
+        .each_ref()
+        .map(|c| (c.points == [[0., 0.], [1., 1.]]) as u8 as f32);
+    p.set("CHANNEL_IDENTITY", &identity);
+    p.set("LEGACY_COLOR", &[r.saturation, r.vibrance]);
+    p.set("HSL", r.hsl.as_flattened());
+    let on = r.grading.iter().any(|g| g[1] != 0. || g[2] != 0.)
+        || e.global_grade[1] != 0.
+        || e.global_grade[2] != 0.;
+    p.set("GRADE_ON", &[on as u8 as f32]);
+    p.set("GRADING", r.grading.as_flattened());
+    p.set("GLOBAL_GRADE", &e.global_grade);
+    p.set("GRADE_BALANCE", &[e.balance, e.blending]);
 }
 impl PixelParams {
     /// Adds the masks' weights and adjustments. `false` when the port cannot render
