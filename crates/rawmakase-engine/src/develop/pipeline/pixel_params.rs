@@ -76,7 +76,7 @@ const FIELDS: &[(&str, usize)] = &[
     ("LOCAL_FAMILIES", 1),
     ("LOCAL_KEYS", 2),
     ("GLOBAL_SH", 2),
-    // Fork: the path without reference curves (`reference_curves == false`): 1 when on.
+    // 1 for the path without reference curves (`reference_curves == false`).
     ("LEGACY", 1),
     // Whites, Blacks, Shadows, Highlights and Dehaze as `tone_stage` applies them.
     ("LEGACY_TONE", 5),
@@ -177,8 +177,8 @@ pub(crate) fn supported(r: &Recipe) -> bool {
         // older operator.
         && (!grading || crate::develop::color_grade::ColorGrade::new(r).is_some())
 }
-/// Fork: the path without reference curves the port also renders: engine 4 with
-/// reference colour and calibration and a profile tone curve, as a film scan
+/// Whether the port renders `r` on the path without reference curves: engine 4 with
+/// reference color and calibration and a profile tone curve, as a film scan
 /// presented as a neutral camera renders.
 pub(crate) fn legacy(r: &Recipe) -> bool {
     r.engine >= 4
@@ -426,7 +426,7 @@ fn fill(r: &Recipe, lut: CurveSet, matrix: [[f32; 3]; 3]) -> Option<PixelParams>
     p.set("GRAY_MIX", &e.gray_mix);
     Some(p)
 }
-/// Fork: the sliders the path without reference curves applies per pixel.
+/// The sliders the path without reference curves applies per pixel.
 fn set_legacy(p: &mut PixelParams, r: &Recipe) {
     let e = &r.effects;
     p.set("LEGACY", &[1.]);

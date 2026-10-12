@@ -101,8 +101,8 @@ pub(crate) fn render_base(
         cancel,
     )?;
     let backend = &mut *stages.backend;
-    // Fork: a region over the GPU's memory budget (`Developer::check`) develops on the
-    // CPU instead of failing there, which would turn the GPU off for good.
+    // A region over the GPU's memory budget (`Processor::check_develop`) develops on
+    // the CPU instead of failing there, which would turn the GPU off for the session.
     if backend.has_gpu()
         && samples.pixels.len() as u64 * 44 <= 1 << 30
         && let Some(mut params) = pixel_params::pixel_params(im, &base)

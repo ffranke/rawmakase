@@ -172,7 +172,10 @@ fn gpu_develop_matches_cpu_pixel_stage() -> Result<()> {
     use crate::{
         camera_data::{CameraImage, Metadata},
         camera_profiles::CameraProfile,
-        develop::pipeline::{Samples, Source, develop_samples, pixel_params::pixel_params},
+        develop::pipeline::{
+            Samples, Source, develop_samples,
+            pixel_params::{legacy, pixel_params},
+        },
     };
     use std::sync::Arc;
     let metadata = Metadata {
@@ -326,6 +329,47 @@ fn gpu_develop_matches_cpu_pixel_stage() -> Result<()> {
     r.effects.monochrome = true;
     r.effects.gray_mix = [0.2, -0.3, 0.1, 0.4, -0.2, 0.3, 0., -0.1];
     recipes.push(r);
+    // The path without reference curves: tone sliders, `apply_curve` (also in wide
+    // gamut), Oklab HSL, vibrance, grading and monochrome.
+    let legacy_base = |profile: &CameraProfile| Recipe {
+        reference_curves: false,
+        ..base(profile)
+    };
+    let legacy_from = recipes.len();
+    recipes.extend([legacy_base(&plain), legacy_base(&tables)]);
+    let mut r = legacy_base(&tables);
+    r.exposure = 0.7;
+    r.contrast = 0.4;
+    r.whites = -0.3;
+    r.blacks = 0.2;
+    r.shadows = 0.5;
+    r.highlights = -0.6;
+    r.effects.dehaze = 0.25;
+    r.curve.insert([0.3, 0.25]);
+    r.effects.channels[2].insert([0.6, 0.7]);
+    recipes.push(r.clone());
+    recipes.push(Recipe {
+        wide_gamut_curves: true,
+        ..r.clone()
+    });
+    r.hsl[1] = [0.3, -0.5, 0.4];
+    r.hsl[5] = [-0.2, 0.6, -0.3];
+    r.saturation = 0.2;
+    r.vibrance = -0.3;
+    recipes.push(r.clone());
+    r.vibrance = 0.5;
+    r.grading[0] = [0.6, 0.4, -0.2];
+    r.grading[2] = [0.1, 0.5, 0.2];
+    r.effects.global_grade = [0.1, 0.2, 0.1];
+    r.effects.balance = -0.3;
+    r.effects.blending = 0.8;
+    recipes.push(r.clone());
+    r.effects.monochrome = true;
+    r.effects.gray_mix = [0.2, -0.3, 0.1, 0.4, -0.2, 0.3, 0., -0.1];
+    recipes.push(r);
+    for (i, recipe) in recipes.iter().enumerate() {
+        assert_eq!(legacy(recipe), i >= legacy_from, "recipe {i}");
+    }
     let mut gpu = Processor::new()?;
     let cancel = AtomicBool::new(false);
     // A local-tone gain changes the Shadows/Highlights map's input.
