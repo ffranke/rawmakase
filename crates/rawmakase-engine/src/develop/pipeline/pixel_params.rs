@@ -430,8 +430,14 @@ fn fill(r: &Recipe, lut: CurveSet, matrix: [[f32; 3]; 3]) -> Option<PixelParams>
 fn set_legacy(p: &mut PixelParams, r: &Recipe) {
     let e = &r.effects;
     p.set("LEGACY", &[1.]);
-    p.set("LEGACY_TONE", &[r.whites, r.blacks, r.shadows, r.highlights, e.dehaze]);
-    p.set("LEGACY_CURVE", &[r.contrast, r.wide_gamut_curves as u8 as f32]);
+    p.set(
+        "LEGACY_TONE",
+        &[r.whites, r.blacks, r.shadows, r.highlights, e.dehaze],
+    );
+    p.set(
+        "LEGACY_CURVE",
+        &[r.contrast, r.wide_gamut_curves as u8 as f32],
+    );
     let identity = e
         .channels
         .each_ref()

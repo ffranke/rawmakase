@@ -290,17 +290,28 @@ pub(super) fn curve_input(
 }
 
 pub(super) fn apply_curve(encoded: f32, c: usize, r: &Recipe, lut: &CurveSet) -> f32 {
+    apply_curve_with(encoded, c, r, lut, r.contrast)
+}
+/// [`apply_curve`] at Contrast `contrast` (fork: the global one plus a mask's).
+pub(super) fn apply_curve_with(
+    encoded: f32,
+    c: usize,
+    r: &Recipe,
+    lut: &CurveSet,
+    contrast: f32,
+) -> f32 {
     let level = ((encoded - r.black_point) / (r.white_point - r.black_point))
         .clamp(0., 1.)
         .powf(1. / r.midtone);
-    let contrast = if r.wide_gamut_curves && r.contrast != 0. {
+    let contrast_slider = contrast;
+    let contrast = if r.wide_gamut_curves && contrast_slider != 0. {
         // A bounded S-curve preserves black/white endpoints and avoids the
         // premature clipping of the legacy affine contrast adjustment.
-        let power = 2f32.powf(r.contrast);
+        let power = 2f32.powf(contrast_slider);
         let low = level.powf(power);
         low / (low + (1. - level).powf(power)).max(1e-8)
     } else {
-        ((level - 0.5) * (1. + r.contrast) + 0.5).clamp(0., 1.)
+        ((level - 0.5) * (1. + contrast_slider) + 0.5).clamp(0., 1.)
     };
     let master = lut.master.evaluate(r.effects.parametric(contrast));
     let curve = &r.effects.channels[c];

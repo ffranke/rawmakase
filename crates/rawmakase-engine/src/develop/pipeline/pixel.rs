@@ -88,9 +88,16 @@ pub(super) fn tone_stage(
             rgb = rgb.map(|v| ramp.eval(v));
         }
     }
-    // Engine 4 renders Dehaze as a measured curve in `apply_reference_curves`.
-    if r.effects.dehaze != 0. && !lut.basic_curves {
-        let a = r.effects.dehaze;
+    // Engine 4 renders Dehaze as a measured curve in `apply_reference_curves`. Fork: on
+    // the path without it, a mask's Dehaze, Whites, Blacks, Shadows and Highlights add
+    // to the global sliders here (the path has no Shadows/Highlights map).
+    let at = |s: usize| match local {
+        Some(l) if !lut.basic_curves => l.delta[s],
+        _ => 0.,
+    };
+    let dehaze = r.effects.dehaze + at(slot::DEHAZE);
+    if dehaze != 0. && !lut.basic_curves {
+        let a = dehaze;
         rgb = rgb.map(|v| {
             if a > 0. {
                 (v - a * 0.02) / (1. - a * 0.6)
@@ -107,7 +114,12 @@ pub(super) fn tone_stage(
     let (whites, blacks, shadows, highlights) = if lut.basic_curves {
         (0., 0., 0., 0.)
     } else {
-        (r.whites, r.blacks, r.shadows, r.highlights)
+        (
+            r.whites + at(slot::WHITES),
+            r.blacks + at(slot::BLACKS),
+            r.shadows + at(slot::SHADOWS),
+            r.highlights + at(slot::HIGHLIGHTS),
+        )
     };
     let ev = shadows * shadow * 2.
         + highlights * high * 2.
@@ -155,7 +167,9 @@ fn mixer_stage(
     } else if r.wide_gamut_curves {
         let p =
             mul(crate::camera_profiles::RGB_TO_PRO, rgb).map(|v| v.clamp(0., 1.).powf(1. / 2.2));
-        let p = std::array::from_fn(|c| apply_curve(p[c], c, r, lut).powf(2.2));
+        // Fork: a mask's Contrast adds to the global one on this path.
+        let contrast = r.contrast + local.map_or(0., |d| d[slot::CONTRAST]);
+        let p = std::array::from_fn(|c| apply_curve_with(p[c], c, r, lut, contrast).powf(2.2));
         mul(crate::camera_profiles::PRO_TO_RGB, p)
     } else {
         rgb
@@ -271,7 +285,12 @@ pub(super) fn color_stage(
         lab = legacy_rgb_table(lab, lut);
         lab[0] = lab[0].clamp(0., 1.);
     }
-    let out = finish_color(lab, r, lut);
+    let out = finish_color_with(
+        lab,
+        r,
+        lut,
+        r.contrast + local.map_or(0., |d| d[slot::CONTRAST]),
+    );
     // Visualize Range grays what the swatch leaves out after every color control, so
     // none of them tints it.
     mixed
@@ -290,7 +309,11 @@ fn legacy_rgb_table(lab: [f32; 3], lut: &CurveSet) -> [f32; 3] {
 /// The colour stage after the colour controls and Defringe: legacy and table colour
 /// grading, gamut compression and, before engine 4, the per-channel curves. Returns
 /// encoded sRGB.
-pub(super) fn finish_color(mut lab: [f32; 3], r: &Recipe, lut: &CurveSet) -> [f32; 3] {
+pub(super) fn finish_color(lab: [f32; 3], r: &Recipe, lut: &CurveSet) -> [f32; 3] {
+    finish_color_with(lab, r, lut, r.contrast)
+}
+/// [`finish_color`] at Contrast `contrast` (fork: the global one plus a mask's).
+fn finish_color_with(mut lab: [f32; 3], r: &Recipe, lut: &CurveSet, contrast: f32) -> [f32; 3] {
     let rgb = if r.reference_color {
         let rgb = if lut.grade.is_some() {
             lab_to_srgb(lab)
@@ -332,7 +355,8 @@ pub(super) fn finish_color(mut lab: [f32; 3], r: &Recipe, lut: &CurveSet) -> [f3
         if r.wide_gamut_curves || r.reference_curves {
             encoded.clamp(0., 1.)
         } else {
-            apply_curve(encoded, c, r, lut)
+            // Fork: a mask's Contrast adds to the global one.
+            apply_curve_with(encoded, c, r, lut, contrast)
         }
     })
 }

@@ -877,6 +877,76 @@ fn gpu_masks_match_cpu_pixel_stage() -> Result<()> {
             "{model:?}: max {max}, mean {mean}"
         );
     }
+    // Fork: the path without reference curves, where a mask's tone sliders add to the
+    // global ones; and they do something there.
+    r.reference_curves = false;
+    for wide in [false, true] {
+        r.wide_gamut_curves = wide;
+        let mut params = pixel_params(source, &r).expect("GPU port covers this recipe");
+        assert!(params.set_masks(source, &r, Some(&weights)));
+        let expected = develop_samples(source, &r, &samples, &cancel, Some(&weights))?;
+        let actual = gpu.develop(&samples, &params, &cancel)?;
+        let d: Vec<f32> = actual
+            .pixels
+            .iter()
+            .flatten()
+            .zip(expected.pixels.iter().flatten())
+            .map(|(a, b)| (a - b).abs())
+            .collect();
+        let mean = d.iter().sum::<f32>() / d.len() as f32;
+        let max = d.iter().copied().fold(0., f32::max);
+        eprintln!("masks without reference curves, wide {wide}: max {max:.6}, mean {mean:.8}");
+        assert!(
+            max < 2e-3 && mean < 2e-5,
+            "wide {wide}: max {max}, mean {mean}"
+        );
+        for (name, off) in [
+            (
+                "shadows",
+                LocalAdjust {
+                    shadows: 0.,
+                    ..r.masks[0].adjust
+                },
+            ),
+            (
+                "highlights",
+                LocalAdjust {
+                    highlights: 0.,
+                    ..r.masks[0].adjust
+                },
+            ),
+            (
+                "contrast",
+                LocalAdjust {
+                    contrast: 0.,
+                    ..r.masks[0].adjust
+                },
+            ),
+            (
+                "whites",
+                LocalAdjust {
+                    whites: 0.,
+                    ..r.masks[0].adjust
+                },
+            ),
+        ] {
+            let mut deltas: Vec<_> = r.masks.iter().map(|m| m.adjust.delta(0.9)).collect();
+            deltas[0] = off.delta(0.9);
+            let w = MaskWeights {
+                deltas,
+                data: weights.data.clone(),
+            };
+            let without = develop_samples(source, &r, &samples, &cancel, Some(&w))?;
+            let moved = without
+                .pixels
+                .iter()
+                .flatten()
+                .zip(expected.pixels.iter().flatten())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0., f32::max);
+            assert!(moved > 1e-3, "a mask's {name} does nothing (wide {wide})");
+        }
+    }
     Ok(())
 }
 

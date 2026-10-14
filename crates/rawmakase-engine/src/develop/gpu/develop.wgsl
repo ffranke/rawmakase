@@ -917,7 +917,12 @@ fn legacy() -> bool {
 // exposure weighted by the pixel's luminance; the profile's tone curve maps the result.
 fn legacy_tone(wide_in: vec3<f32>) -> vec3<f32> {
     var wide = wide_in;
-    let a = p(P_LEGACY_TONE + 4u);
+    // A mask's Dehaze, Whites, Blacks, Shadows and Highlights add to the global sliders.
+    var d = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+    if masked {
+        d = array<f32, 5>(delta[L_WHITES], delta[L_BLACKS], delta[L_SHADOWS], delta[L_HIGHLIGHTS], delta[L_DEHAZE]);
+    }
+    let a = p(P_LEGACY_TONE + 4u) + d[4];
     if a > 0.0 {
         wide = (wide - a * 0.02) / (1.0 - a * 0.6);
     } else if a < 0.0 {
@@ -926,10 +931,10 @@ fn legacy_tone(wide_in: vec3<f32>) -> vec3<f32> {
     let y = max(luma2020(wide), 1e-8);
     let shadow = exp(-y * 6.0);
     let high = y / (y + 0.5);
-    let ev = p(P_LEGACY_TONE + 2u) * shadow * 2.0
-        + p(P_LEGACY_TONE + 3u) * high * 2.0
-        + p(P_LEGACY_TONE) * high * high * high
-        + p(P_LEGACY_TONE + 1u) * shadow * shadow * shadow;
+    let ev = (p(P_LEGACY_TONE + 2u) + d[2]) * shadow * 2.0
+        + (p(P_LEGACY_TONE + 3u) + d[3]) * high * 2.0
+        + (p(P_LEGACY_TONE) + d[0]) * high * high * high
+        + (p(P_LEGACY_TONE + 1u) + d[1]) * shadow * shadow * shadow;
     let shaped = y * exp2(ev);
     return wide * shaped / y;
 }
@@ -939,7 +944,8 @@ fn apply_curve(encoded: f32, c: u32) -> f32 {
     let bp = p(P_LEVELS);
     let wp = p(P_LEVELS + 1u);
     let level = powf(clamp((encoded - bp) / (wp - bp), 0.0, 1.0), 1.0 / p(P_LEVELS + 2u));
-    let contrast = p(P_LEGACY_CURVE);
+    // A mask's Contrast adds to the global one.
+    let contrast = p(P_LEGACY_CURVE) + select(0.0, delta[L_CONTRAST], masked);
     var x: f32;
     if p(P_LEGACY_CURVE + 1u) != 0.0 && contrast != 0.0 {
         let power = exp2(contrast);
